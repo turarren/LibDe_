@@ -6,39 +6,46 @@ import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
 
-interface BookData {
+interface LibraryData {
   id: string;
   title: string;
   author: string;
-  encryptedBorrowCount: string;
-  publicRating: number;
+  isbn: string;
+  encryptedPages: string;
+  publicValue1: number;
+  publicValue2: number;
   description: string;
-  timestamp: number;
   creator: string;
+  timestamp: number;
   isVerified?: boolean;
   decryptedValue?: number;
+}
+
+interface LibraryStats {
+  totalBooks: number;
+  verifiedBooks: number;
+  avgPages: number;
+  recentAdditions: number;
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [books, setBooks] = useState<BookData[]>([]);
+  const [books, setBooks] = useState<LibraryData[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [showBorrowModal, setShowBorrowModal] = useState(false);
-  const [borrowingBook, setBorrowingBook] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addingBook, setAddingBook] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
     status: "pending", 
     message: "" 
   });
-  const [newBookData, setNewBookData] = useState({ title: "", author: "", rating: "", borrowCount: "" });
-  const [selectedBook, setSelectedBook] = useState<BookData | null>(null);
-  const [decryptedCount, setDecryptedCount] = useState<number | null>(null);
-  const [isDecrypting, setIsDecrypting] = useState(false);
+  const [newBookData, setNewBookData] = useState({ title: "", author: "", isbn: "", pages: "" });
+  const [selectedBook, setSelectedBook] = useState<LibraryData | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [userHistory, setUserHistory] = useState<string[]>([]);
+  const [stats, setStats] = useState<LibraryStats>({ totalBooks: 0, verifiedBooks: 0, avgPages: 0, recentAdditions: 0 });
   const [contractAddress, setContractAddress] = useState("");
-  const [fhevmInitializing, setFhevmInitializing] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [showFAQ, setShowFAQ] = useState(false);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -46,25 +53,25 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected || isInitialized) return;
       
       try {
-        setFhevmInitializing(true);
+        console.log('Initializing FHEVM for privacy library...');
         await initialize();
+        console.log('FHEVM initialized successfully');
       } catch (error) {
+        console.error('FHEVM initialization failed:', error);
         setTransactionStatus({ 
           visible: true, 
           status: "error", 
           message: "FHEVM initialization failed" 
         });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
-      } finally {
-        setFhevmInitializing(false);
       }
     };
 
     initFhevmAfterConnection();
-  }, [isConnected, isInitialized, initialize, fhevmInitializing]);
+  }, [isConnected, isInitialized, initialize]);
 
   useEffect(() => {
     const loadDataAndContract = async () => {
@@ -78,7 +85,7 @@ const App: React.FC = () => {
         const contract = await getContractReadOnly();
         if (contract) setContractAddress(await contract.getAddress());
       } catch (error) {
-        console.error('Failed to load data:', error);
+        console.error('Failed to load library data:', error);
       } finally {
         setLoading(false);
       }
@@ -96,7 +103,7 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const booksList: BookData[] = [];
+      const booksList: LibraryData[] = [];
       
       for (const businessId of businessIds) {
         try {
@@ -104,12 +111,14 @@ const App: React.FC = () => {
           booksList.push({
             id: businessId,
             title: businessData.name,
-            author: businessData.description,
-            encryptedBorrowCount: businessId,
-            publicRating: Number(businessData.publicValue1) || 0,
+            author: "Anonymous Author",
+            isbn: `ISBN-${businessId.substring(0, 8)}`,
+            encryptedPages: businessId,
+            publicValue1: Number(businessData.publicValue1) || 0,
+            publicValue2: Number(businessData.publicValue2) || 0,
             description: businessData.description,
-            timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
+            timestamp: Number(businessData.timestamp),
             isVerified: businessData.isVerified,
             decryptedValue: Number(businessData.decryptedValue) || 0
           });
@@ -119,6 +128,7 @@ const App: React.FC = () => {
       }
       
       setBooks(booksList);
+      calculateStats(booksList);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load books" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -127,75 +137,103 @@ const App: React.FC = () => {
     }
   };
 
-  const borrowBook = async () => {
+  const calculateStats = (booksList: LibraryData[]) => {
+    const totalBooks = booksList.length;
+    const verifiedBooks = booksList.filter(b => b.isVerified).length;
+    const avgPages = booksList.length > 0 
+      ? booksList.reduce((sum, b) => sum + b.publicValue1, 0) / booksList.length 
+      : 0;
+    const recentAdditions = booksList.filter(b => 
+      Date.now()/1000 - b.timestamp < 60 * 60 * 24 * 7
+    ).length;
+
+    setStats({ totalBooks, verifiedBooks, avgPages, recentAdditions });
+  };
+
+  const addBook = async () => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "请先连接钱包" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setBorrowingBook(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Borrowing book with FHE encryption..." });
+    setAddingBook(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "使用Zama FHE加密添加图书..." });
     
     try {
       const contract = await getContractWithSigner();
-      if (!contract) throw new Error("Failed to get contract with signer");
+      if (!contract) throw new Error("获取合约失败");
       
-      const borrowValue = parseInt(newBookData.borrowCount) || 1;
-      const bookId = `book-${Date.now()}`;
+      const pagesValue = parseInt(newBookData.pages) || 0;
+      const businessId = `book-${Date.now()}`;
       
-      const encryptedResult = await encrypt(contractAddress, address, borrowValue);
+      const encryptedResult = await encrypt(contractAddress, address, pagesValue);
       
       const tx = await contract.createBusinessData(
-        bookId,
+        businessId,
         newBookData.title,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        parseInt(newBookData.rating) || 5,
+        pagesValue,
         0,
-        newBookData.author
+        `作者: ${newBookData.author}, ISBN: ${newBookData.isbn}`
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "等待交易确认..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Book borrowed successfully!" });
+      setUserHistory(prev => [...prev, `添加图书: ${newBookData.title}`]);
+      setTransactionStatus({ visible: true, status: "success", message: "图书添加成功!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadBooks();
-      setShowBorrowModal(false);
-      setNewBookData({ title: "", author: "", rating: "", borrowCount: "" });
+      setShowAddModal(false);
+      setNewBookData({ title: "", author: "", isbn: "", pages: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected" 
-        : "Borrow failed: " + (e.message || "Unknown error");
+        ? "用户取消了交易" 
+        : "提交失败: " + (e.message || "未知错误");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setBorrowingBook(false); 
+      setAddingBook(false); 
     }
   };
 
-  const decryptBorrowCount = async (bookId: string): Promise<number | null> => {
+  const checkAvailability = async () => {
+    if (!isConnected) return;
+    
+    try {
+      const contract = await getContractReadOnly();
+      if (!contract) return;
+      
+      const isAvailable = await contract.isAvailable();
+      setTransactionStatus({ visible: true, status: "success", message: "系统可用性检查成功!" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+    } catch (e) {
+      setTransactionStatus({ visible: true, status: "error", message: "可用性检查失败" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    }
+  };
+
+  const decryptBookData = async (bookId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
-      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTransactionStatus({ visible: true, status: "error", message: "请先连接钱包" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
     
-    setIsDecrypting(true);
     try {
       const contractRead = await getContractReadOnly();
       if (!contractRead) return null;
       
-      const bookData = await contractRead.getBusinessData(bookId);
-      if (bookData.isVerified) {
-        const storedValue = Number(bookData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Borrow count already verified" });
+      const businessData = await contractRead.getBusinessData(bookId);
+      if (businessData.isVerified) {
+        setTransactionStatus({ visible: true, status: "success", message: "数据已链上验证" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-        return storedValue;
+        return Number(businessData.decryptedValue) || 0;
       }
       
       const contractWrite = await getContractWithSigner();
@@ -210,66 +248,44 @@ const App: React.FC = () => {
           contractWrite.verifyDecryption(bookId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying borrow count..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "链上验证解密中..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
-      
       await loadBooks();
+      setUserHistory(prev => [...prev, `解密图书数据: ${bookId}`]);
       
-      setTransactionStatus({ visible: true, status: "success", message: "Borrow count decrypted!" });
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 2000);
+      setTransactionStatus({ visible: true, status: "success", message: "数据解密验证成功!" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
       
       return Number(clearValue);
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified" });
+        setTransactionStatus({ visible: true, status: "success", message: "数据已链上验证" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         await loadBooks();
         return null;
       }
       
-      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed" });
+      setTransactionStatus({ visible: true, status: "error", message: "解密失败: " + (e.message || "未知错误") });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
-    } finally { 
-      setIsDecrypting(false); 
-    }
-  };
-
-  const checkAvailability = async () => {
-    try {
-      const contract = await getContractReadOnly();
-      if (!contract) return;
-      
-      const available = await contract.isAvailable();
-      setTransactionStatus({ visible: true, status: "success", message: "Library system is available" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
-    } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
   const filteredBooks = books.filter(book => 
-    book.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    book.author.toLowerCase().includes(searchQuery.toLowerCase())
+    book.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    book.author.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    book.isbn.toLowerCase().includes(searchTerm.toLowerCase())
   );
-
-  const stats = {
-    totalBooks: books.length,
-    verifiedBooks: books.filter(b => b.isVerified).length,
-    avgRating: books.length > 0 ? books.reduce((sum, b) => sum + b.publicRating, 0) / books.length : 0
-  };
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>🔒 FHE Library</h1>
+            <h1>🌿 隐私图书馆</h1>
+            <p>FHE加密保护您的阅读自由</p>
           </div>
           <div className="header-actions">
             <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
@@ -279,19 +295,34 @@ const App: React.FC = () => {
         <div className="connection-prompt">
           <div className="connection-content">
             <div className="connection-icon">📚</div>
-            <h2>Welcome to Private Library</h2>
-            <p>Connect your wallet to access FHE-protected book borrowing with complete privacy</p>
+            <h2>连接钱包进入隐私图书馆</h2>
+            <p>基于Zama FHE的全同态加密技术，保护您的借阅隐私</p>
+            <div className="connection-steps">
+              <div className="step">
+                <span>1</span>
+                <p>连接您的钱包</p>
+              </div>
+              <div className="step">
+                <span>2</span>
+                <p>FHE系统自动初始化</p>
+              </div>
+              <div className="step">
+                <span>3</span>
+                <p>开始加密借阅之旅</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  if (!isInitialized || fhevmInitializing) {
+  if (!isInitialized) {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE Encryption...</p>
+        <p>初始化FHE加密系统...</p>
+        <p>状态: {status}</p>
       </div>
     );
   }
@@ -299,141 +330,168 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading private library...</p>
+      <p>加载隐私图书馆...</p>
     </div>
   );
 
   return (
     <div className="app-container">
       <header className="app-header">
-        <div className="logo">
-          <h1>🔒 FHE Private Library</h1>
+        <div className="logo-section">
+          <h1>🌿 LibDe_Zama</h1>
+          <p>全同态加密隐私图书馆</p>
         </div>
         
-        <div className="header-actions">
-          <button onClick={checkAvailability} className="status-btn">
-            Check Status
-          </button>
-          <button onClick={() => setShowBorrowModal(true)} className="borrow-btn">
-            Borrow Book
-          </button>
-          <button onClick={() => setShowFAQ(!showFAQ)} className="faq-btn">
-            FAQ
-          </button>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+        <div className="header-controls">
+          <div className="search-box">
+            <input 
+              type="text" 
+              placeholder="搜索图书标题、作者或ISBN..." 
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+            <span className="search-icon">🔍</span>
+          </div>
+          
+          <div className="header-buttons">
+            <button onClick={checkAvailability} className="wood-btn">
+              检查系统
+            </button>
+            <button onClick={() => setShowAddModal(true)} className="wood-btn primary">
+              添加图书
+            </button>
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          </div>
         </div>
       </header>
-      
-      <div className="main-content">
-        <div className="stats-panels">
-          <div className="stat-panel">
-            <h3>Total Books</h3>
-            <div className="stat-value">{stats.totalBooks}</div>
-          </div>
-          <div className="stat-panel">
-            <h3>Verified Data</h3>
-            <div className="stat-value">{stats.verifiedBooks}/{stats.totalBooks}</div>
-          </div>
-          <div className="stat-panel">
-            <h3>Avg Rating</h3>
-            <div className="stat-value">{stats.avgRating.toFixed(1)}/5</div>
-          </div>
-        </div>
 
-        <div className="search-section">
-          <input
-            type="text"
-            placeholder="Search books or authors..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="search-input"
-          />
-          <button onClick={loadBooks} disabled={isRefreshing} className="refresh-btn">
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-
-        {showFAQ && (
-          <div className="faq-section">
-            <h3>FHE Library FAQ</h3>
-            <div className="faq-item">
-              <strong>How does FHE protect my privacy?</strong>
-              <p>Borrow counts are encrypted using Fully Homomorphic Encryption, ensuring even the library cannot track your reading habits.</p>
+      <main className="main-content">
+        <section className="stats-section">
+          <div className="stats-grid">
+            <div className="stat-card wood-card">
+              <h3>馆藏总数</h3>
+              <div className="stat-value">{stats.totalBooks}</div>
+              <div className="stat-trend">+{stats.recentAdditions} 本周新增</div>
             </div>
-            <div className="faq-item">
-              <strong>What data is encrypted?</strong>
-              <p>Only borrow counts are encrypted. Book titles and ratings remain public for discovery.</p>
+            
+            <div className="stat-card wood-card">
+              <h3>已验证数据</h3>
+              <div className="stat-value">{stats.verifiedBooks}/{stats.totalBooks}</div>
+              <div className="stat-trend">FHE加密验证</div>
             </div>
-            <div className="faq-item">
-              <strong>How does decryption work?</strong>
-              <p>Decryption happens offline using FHEVM, with proofs verified on-chain for transparency.</p>
+            
+            <div className="stat-card wood-card">
+              <h3>平均页数</h3>
+              <div className="stat-value">{stats.avgPages.toFixed(0)}</div>
+              <div className="stat-trend">页/本</div>
             </div>
           </div>
-        )}
+        </section>
 
-        <div className="books-grid">
-          {filteredBooks.length === 0 ? (
-            <div className="no-books">
-              <p>No books found</p>
-              <button onClick={() => setShowBorrowModal(true)} className="borrow-btn">
-                Borrow First Book
+        <section className="books-section">
+          <div className="section-header">
+            <h2>📖 馆藏图书</h2>
+            <div className="section-actions">
+              <button onClick={loadBooks} className="wood-btn" disabled={isRefreshing}>
+                {isRefreshing ? "刷新中..." : "刷新列表"}
               </button>
             </div>
-          ) : (
-            filteredBooks.map((book, index) => (
-              <div 
-                className={`book-card ${selectedBook?.id === book.id ? "selected" : ""}`}
-                key={index}
-                onClick={() => setSelectedBook(book)}
-              >
-                <div className="book-title">{book.title}</div>
-                <div className="book-author">by {book.author}</div>
-                <div className="book-rating">Rating: {"⭐".repeat(book.publicRating)}</div>
-                <div className="book-status">
-                  {book.isVerified ? 
-                    `Borrowed: ${book.decryptedValue} times ✅` : 
-                    "Borrow count: 🔒 Encrypted"
-                  }
-                </div>
+          </div>
+
+          <div className="books-grid">
+            {filteredBooks.length === 0 ? (
+              <div className="empty-state wood-card">
+                <div className="empty-icon">📚</div>
+                <p>暂无图书数据</p>
+                <button onClick={() => setShowAddModal(true)} className="wood-btn primary">
+                  添加第一本图书
+                </button>
               </div>
-            ))
-          )}
-        </div>
-      </div>
-      
-      {showBorrowModal && (
-        <BorrowModal 
-          onSubmit={borrowBook} 
-          onClose={() => setShowBorrowModal(false)} 
-          borrowing={borrowingBook} 
-          bookData={newBookData} 
+            ) : (
+              filteredBooks.map((book, index) => (
+                <div key={index} className="book-card wood-card">
+                  <div className="book-header">
+                    <h3>{book.title}</h3>
+                    <span className={`status-badge ${book.isVerified ? 'verified' : 'encrypted'}`}>
+                      {book.isVerified ? '✅ 已验证' : '🔒 加密中'}
+                    </span>
+                  </div>
+                  
+                  <div className="book-meta">
+                    <span>作者: {book.author}</span>
+                    <span>ISBN: {book.isbn}</span>
+                  </div>
+                  
+                  <div className="book-info">
+                    <div className="info-item">
+                      <label>页数:</label>
+                      <span>
+                        {book.isVerified ? 
+                          `${book.decryptedValue}页 (已解密)` : 
+                          "🔒 FHE加密"
+                        }
+                      </span>
+                    </div>
+                    
+                    <div className="info-item">
+                      <label>添加时间:</label>
+                      <span>{new Date(book.timestamp * 1000).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+
+                  <div className="book-actions">
+                    <button 
+                      onClick={() => decryptBookData(book.id)}
+                      className={`wood-btn small ${book.isVerified ? 'verified' : ''}`}
+                    >
+                      {book.isVerified ? '✅ 已验证' : '🔓 验证解密'}
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="history-section">
+          <div className="section-header">
+            <h2>📋 操作记录</h2>
+          </div>
+          <div className="history-list wood-card">
+            {userHistory.length === 0 ? (
+              <p className="no-history">暂无操作记录</p>
+            ) : (
+              userHistory.slice(-5).map((record, index) => (
+                <div key={index} className="history-item">
+                  <span className="time">{new Date().toLocaleTimeString()}</span>
+                  <span className="action">{record}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </main>
+
+      {showAddModal && (
+        <AddBookModal 
+          onSubmit={addBook}
+          onClose={() => setShowAddModal(false)}
+          adding={addingBook}
+          bookData={newBookData}
           setBookData={setNewBookData}
           isEncrypting={isEncrypting}
         />
       )}
-      
-      {selectedBook && (
-        <BookDetailModal 
-          book={selectedBook} 
-          onClose={() => { 
-            setSelectedBook(null); 
-            setDecryptedCount(null); 
-          }} 
-          decryptedCount={decryptedCount} 
-          isDecrypting={isDecrypting || fheIsDecrypting} 
-          decryptData={() => decryptBorrowCount(selectedBook.id)}
-        />
-      )}
-      
+
       {transactionStatus.visible && (
-        <div className="transaction-modal">
-          <div className="transaction-content">
-            <div className={`transaction-icon ${transactionStatus.status}`}>
-              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
+        <div className="notification">
+          <div className={`notification-content ${transactionStatus.status}`}>
+            <div className="notification-icon">
+              {transactionStatus.status === "pending" && <div className="spinner"></div>}
               {transactionStatus.status === "success" && "✓"}
               {transactionStatus.status === "error" && "✗"}
             </div>
-            <div className="transaction-message">{transactionStatus.message}</div>
+            <div className="notification-message">{transactionStatus.message}</div>
           </div>
         </div>
       )}
@@ -441,17 +499,17 @@ const App: React.FC = () => {
   );
 };
 
-const BorrowModal: React.FC<{
-  onSubmit: () => void; 
-  onClose: () => void; 
-  borrowing: boolean;
+const AddBookModal: React.FC<{
+  onSubmit: () => void;
+  onClose: () => void;
+  adding: boolean;
   bookData: any;
   setBookData: (data: any) => void;
   isEncrypting: boolean;
-}> = ({ onSubmit, onClose, borrowing, bookData, setBookData, isEncrypting }) => {
+}> = ({ onSubmit, onClose, adding, bookData, setBookData, isEncrypting }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    if (name === 'borrowCount') {
+    if (name === 'pages') {
       const intValue = value.replace(/[^\d]/g, '');
       setBookData({ ...bookData, [name]: intValue });
     } else {
@@ -461,156 +519,74 @@ const BorrowModal: React.FC<{
 
   return (
     <div className="modal-overlay">
-      <div className="borrow-modal">
+      <div className="modal-content wood-card">
         <div className="modal-header">
-          <h2>Borrow New Book</h2>
-          <button onClick={onClose} className="close-modal">×</button>
+          <h2>添加新图书</h2>
+          <button onClick={onClose} className="close-btn">×</button>
         </div>
         
         <div className="modal-body">
           <div className="fhe-notice">
-            <strong>FHE Privacy Protection</strong>
-            <p>Borrow count encrypted with Zama FHE - even we can't see it!</p>
+            <strong>FHE 🔐 隐私保护</strong>
+            <p>图书页数将使用Zama FHE进行加密，保护读者隐私</p>
           </div>
           
           <div className="form-group">
-            <label>Book Title *</label>
+            <label>图书标题 *</label>
             <input 
               type="text" 
               name="title" 
               value={bookData.title} 
               onChange={handleChange} 
-              placeholder="Enter book title..." 
+              placeholder="输入图书标题..." 
             />
           </div>
           
           <div className="form-group">
-            <label>Author *</label>
+            <label>作者 *</label>
             <input 
               type="text" 
               name="author" 
               value={bookData.author} 
               onChange={handleChange} 
-              placeholder="Enter author name..." 
+              placeholder="输入作者姓名..." 
             />
           </div>
           
           <div className="form-group">
-            <label>Your Rating (1-5) *</label>
+            <label>ISBN *</label>
             <input 
-              type="number" 
-              min="1" 
-              max="5" 
-              name="rating" 
-              value={bookData.rating} 
+              type="text" 
+              name="isbn" 
+              value={bookData.isbn} 
               onChange={handleChange} 
-              placeholder="Enter rating..." 
+              placeholder="输入ISBN号..." 
             />
           </div>
           
           <div className="form-group">
-            <label>Borrow Count (Encrypted) *</label>
+            <label>页数 (整数) *</label>
             <input 
               type="number" 
-              name="borrowCount" 
-              value={bookData.borrowCount} 
+              name="pages" 
+              value={bookData.pages} 
               onChange={handleChange} 
-              placeholder="Enter borrow count..." 
-              step="1"
+              placeholder="输入页数..." 
               min="1"
             />
-            <div className="data-type-label">FHE Encrypted Integer</div>
+            <div className="input-hint">FHE加密整数数据</div>
           </div>
         </div>
         
         <div className="modal-footer">
-          <button onClick={onClose} className="cancel-btn">Cancel</button>
+          <button onClick={onClose} className="wood-btn">取消</button>
           <button 
-            onClick={onSubmit} 
-            disabled={borrowing || isEncrypting || !bookData.title || !bookData.author || !bookData.rating || !bookData.borrowCount} 
-            className="submit-btn"
+            onClick={onSubmit}
+            disabled={adding || isEncrypting || !bookData.title || !bookData.author || !bookData.isbn || !bookData.pages}
+            className="wood-btn primary"
           >
-            {borrowing || isEncrypting ? "Encrypting..." : "Borrow Book"}
+            {adding || isEncrypting ? "加密并添加中..." : "添加图书"}
           </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const BookDetailModal: React.FC<{
-  book: BookData;
-  onClose: () => void;
-  decryptedCount: number | null;
-  isDecrypting: boolean;
-  decryptData: () => Promise<number | null>;
-}> = ({ book, onClose, decryptedCount, isDecrypting, decryptData }) => {
-  const handleDecrypt = async () => {
-    if (decryptedCount !== null) return;
-    await decryptData();
-  };
-
-  return (
-    <div className="modal-overlay">
-      <div className="book-detail-modal">
-        <div className="modal-header">
-          <h2>Book Details</h2>
-          <button onClick={onClose} className="close-modal">×</button>
-        </div>
-        
-        <div className="modal-body">
-          <div className="book-info">
-            <div className="info-item">
-              <span>Title:</span>
-              <strong>{book.title}</strong>
-            </div>
-            <div className="info-item">
-              <span>Author:</span>
-              <strong>{book.author}</strong>
-            </div>
-            <div className="info-item">
-              <span>Rating:</span>
-              <strong>{"⭐".repeat(book.publicRating)}</strong>
-            </div>
-          </div>
-          
-          <div className="privacy-section">
-            <h3>Privacy Protection</h3>
-            
-            <div className="data-row">
-              <div className="data-label">Borrow Count:</div>
-              <div className="data-value">
-                {book.isVerified ? 
-                  `${book.decryptedValue} times (Verified)` : 
-                  decryptedCount !== null ? 
-                  `${decryptedCount} times (Decrypted)` : 
-                  "🔒 FHE Encrypted"
-                }
-              </div>
-              <button 
-                className={`decrypt-btn ${(book.isVerified || decryptedCount !== null) ? 'decrypted' : ''}`}
-                onClick={handleDecrypt} 
-                disabled={isDecrypting}
-              >
-                {isDecrypting ? "Decrypting..." : 
-                 book.isVerified ? "✅ Verified" : 
-                 decryptedCount !== null ? "🔓 Decrypted" : 
-                 "🔓 Decrypt Count"}
-              </button>
-            </div>
-            
-            <div className="fhe-info">
-              <div className="fhe-icon">🔐</div>
-              <div>
-                <strong>FHE Privacy Guarantee</strong>
-                <p>Your reading habits are encrypted. Only you can decrypt the borrow count with your wallet.</p>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-        <div className="modal-footer">
-          <button onClick={onClose} className="close-btn">Close</button>
         </div>
       </div>
     </div>
